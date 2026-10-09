@@ -155,11 +155,12 @@ body{background:linear-gradient(135deg,#f3f7fc 0%,#f8fafc 55%,#eef4fb 100%)}
 <div id="login" class="login">
   <div class="loginbox">
     <img id="loginLogo">
-    <h2>ALT-TECH Group</h2><p>Administration — connexion locale</p>
-    <input id="loginPass" class="input" type="password" placeholder="Mot de passe">
+    <h2>ALT-TECH Group</h2><p>Administration — connexion Supabase sécurisée</p>
+    <input id="loginEmail" class="input" type="email" placeholder="Adresse e-mail administrateur" autocomplete="username" style="margin-bottom:8px">
+    <input id="loginPass" class="input" type="password" placeholder="Mot de passe" autocomplete="current-password">
     <button class="btn primary" style="width:100%;margin-top:6px" onclick="login()">Se connecter</button>
     <p id="loginError" style="color:#b72b2b"></p>
-    <small>Accès sécurisé — le mot de passe est confidentiel. Vous pouvez le modifier dans Paramètres.</small>
+    <small>Accès sécurisé par Supabase Auth — vos données sont synchronisées avec la base ALT-TECH.</small>
   </div>
 </div>
 
@@ -2006,4 +2007,59 @@ function makeStudentQrSvg(info){
   </svg>`;
 }
 </script>
-</body></html>
+\n<script id="alttech-supabase-sync">
+/* ALT-TECH Group — Supabase cloud adapter. Publishable key only; RLS protects all tables. */
+const ALT_SUPABASE_URL="https://ewzgnkzlcnfdwrybclfb.supabase.co";
+const ALT_SUPABASE_KEY="sb_publishable_8s0ECmg09Y0Qgeq-vJWeag_212CjCaS";
+const ALT_AUTH_KEY="alttech_supabase_auth_v1";
+let altAuth=null, altSyncTimer=null, altSyncing=false, altRemoteLoaded=false;
+function altHeaders(extra={}){return Object.assign({"apikey":ALT_SUPABASE_KEY,"Authorization":"Bearer "+(altAuth?.access_token||ALT_SUPABASE_KEY),"Content-Type":"application/json"},extra)}
+async function altFetch(path,opt={}){const r=await fetch(ALT_SUPABASE_URL+path,Object.assign({},opt,{headers:altHeaders(opt.headers||{})}));if(!r.ok){let t=await r.text();throw new Error((t||r.statusText)+" ["+r.status+"]")}if(r.status===204)return null;const t=await r.text();return t?JSON.parse(t):null}
+async function altSelect(table,query=""){return await altFetch(`/rest/v1/${table}?select=*${query?"&"+query:""}`)}
+async function altUpsert(table,rows){if(!rows||!rows.length)return;return await altFetch(`/rest/v1/${table}`,{method:"POST",headers:{"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(rows)})}
+async function altDeleteMissing(table,ids){if(!altRemoteLoaded)return;const remote=await altSelect(table);const keep=new Set((ids||[]).map(String));for(const r of remote||[])if(!keep.has(String(r.id)))await altFetch(`/rest/v1/${table}?id=eq.${encodeURIComponent(r.id)}`,{method:"DELETE"})}
+function altActive(k){return Array.isArray(db[k])?db[k].filter(x=>!x.deletedAt):[]}
+function altDate(v){return v||today()}
+function altBoolStatus(v){return !/inactif|annul/i.test(String(v||""))}
+async function altLoadRemote(){
+ const [students,formations,services,quotes,qlines,invoices,flines,income,expense,certs,settings,trainers,links]=await Promise.all([
+  altSelect("etudiants"),altSelect("formations"),altSelect("services"),altSelect("devis"),altSelect("devis_lignes"),altSelect("factures"),altSelect("facture_lignes"),altSelect("entrees_fonds"),altSelect("sorties_fonds"),altSelect("attestations"),altSelect("parametres"),altSelect("formateurs"),altSelect("etudiant_formations")
+ ]);
+ const count=[students,formations,services,quotes,invoices,income,expense,certs].reduce((n,a)=>n+(a?.length||0),0);
+ if(!count){altRemoteLoaded=true;return false}
+ const trainerMap=Object.fromEntries((trainers||[]).map(x=>[x.id,x.nom_complet]));
+ const formMap=Object.fromEntries((formations||[]).map(x=>[x.id,x]));
+ db.formations=(formations||[]).map(x=>({id:x.id,ref:"FOR-"+String(x.id).slice(0,8),name:x.nom,price:+x.prix||0,status:x.actif?"Disponible":"Indisponible",cat:"Formation professionnelle",desc:"",duration:"",sessions:0,reg:0,trainer:"",start:"",end:"",max:0,obs:""}));
+ db.services=(services||[]).map(x=>({id:x.id,ref:"SER-"+String(x.id).slice(0,8),name:x.nom,price:+x.prix_defaut||0,status:x.actif?"Actif":"Inactif",cat:"Prestations informatiques",desc:"",unit:"Prestation",obs:""}));
+ const linkByStudent={};(links||[]).forEach(l=>(linkByStudent[l.etudiant_id]??=[]).push(l));
+ db.students=(students||[]).map(x=>{const ls=linkByStudent[x.id]||[],fn=ls.map(l=>formMap[l.formation_id]?.nom).filter(Boolean);return {id:x.id,ref:x.matricule||"ETU-"+String(x.id).slice(0,8),nom:x.nom_complet,prenom:"",phone:x.telephone||"",address:x.adresse||"",formations:fn,formation:fn[0]||"",formateur:trainerMap[x.formateur_id]||"",date:x.date_inscription,insFee:+x.frais_inscription||0,paidInsFee:+x.montant_inscription_paye||0,paidFee:+x.montant_formation_paye||0,fee:ls.reduce((n,l)=>n+(+l.prix_convenu||0),0),scheduleDays:[],scheduleRoom:x.emploi_du_temps||"",status:x.actif?"Actif":"Inactif",obs:""}});
+ const qlm={};(qlines||[]).forEach(l=>(qlm[l.devis_id]??=[]).push({serviceName:l.nom_service,qty:+l.quantite||1,price:+l.prix_unitaire||0,rem:0}));
+ db.quotes=(quotes||[]).map(x=>({id:x.id,ref:x.numero||"DEV-"+String(x.id).slice(0,8),client:x.client_nom,phone:x.client_telephone||"",address:"",date:x.date_devis,valid:x.date_expiration||"15 jours",status:x.statut,lines:qlm[x.id]||[],total:+x.montant_total||0,paid:+x.montant_paye||0,remaining:Math.max(0,(+x.montant_total||0)-(+x.montant_paye||0))}));
+ const flm={};(flines||[]).forEach(l=>(flm[l.facture_id]??=[]).push({serviceName:l.nom_service,qty:+l.quantite||1,price:+l.prix_unitaire||0,rem:0}));
+ db.invoices=(invoices||[]).map(x=>({id:x.id,ref:x.numero||"FAC-"+String(x.id).slice(0,8),client:x.client_nom,phone:x.client_telephone||"",address:"",date:x.date_facture,status:x.statut,lines:flm[x.id]||[],total:+x.montant_total||0,paid:+x.montant_paye||0,remaining:Math.max(0,(+x.montant_total||0)-(+x.montant_paye||0))}));
+ db.income=(income||[]).map(x=>({id:x.id,ref:x.reference||"ENT-"+String(x.id).slice(0,8),serviceName:x.nom_service,date:x.date_operation,amount:+x.montant||0,mode:""}));
+ db.expense=(expense||[]).map(x=>({id:x.id,ref:x.reference||"SOR-"+String(x.id).slice(0,8),reason:x.motif,date:x.date_operation,amount:+x.montant||0,cat:"Autre",benef:"",mode:""}));
+ db.certificates=(certs||[]).map(x=>{const st=db.students.find(s=>s.id===x.etudiant_id),fo=formMap[x.formation_id];return {id:x.id,ref:"ATT-"+String(x.id).slice(0,8),student:x.etudiant_id,studentRef:st?.ref||"",name:st?.nom||"Étudiant",formation:fo?.nom||"Formation",duration:"",start:"",end:"",mention:x.mention||"ATTESTATION",date:x.date_transmission,responsible:"M. ABDOULAYE BANGOURA",formateur:trainerMap[x.formateur_id]||"Le Formateur"}});
+ if(settings?.[0]){const x=settings[0];db.settings=Object.assign({},db.settings,{name:x.nom_entreprise||db.settings.name,address:x.adresse||"",phones:x.telephone||"",email:x.email||"",logo:x.logo_url||db.settings.logo,activity:x.slogan||db.settings.activity});}
+ altRemoteLoaded=true;storageSet(KEY,JSON.stringify(db));return true
+}
+async function altSyncRemote(){if(!altAuth||altSyncing)return;altSyncing=true;try{
+ const forms=altActive("formations"),services=altActive("services"),students=altActive("students"),quotes=altActive("quotes"),invoices=altActive("invoices"),income=altActive("income"),expense=altActive("expense"),certs=altActive("certificates");
+ await altUpsert("formations",forms.map(x=>({id:x.id,nom:x.name||"Formation",prix:+x.price||0,actif:altBoolStatus(x.status)})));
+ await altUpsert("services",services.map(x=>({id:x.id,nom:x.name||"Service",prix_defaut:+x.price||0,actif:altBoolStatus(x.status)})));
+ const trainerNames=[...new Set(students.map(x=>String(x.formateur||"").trim()).filter(Boolean))];let remoteTrainers=await altSelect("formateurs");for(const name of trainerNames){if(!(remoteTrainers||[]).some(t=>t.nom_complet===name)){await altUpsert("formateurs",[{id:uuid(),nom_complet:name,telephone:null,actif:true}]);}}remoteTrainers=await altSelect("formateurs");const tid=n=>remoteTrainers.find(t=>t.nom_complet===n)?.id||null;
+ await altUpsert("etudiants",students.map(x=>({id:x.id,matricule:x.ref||null,nom_complet:((x.prenom||"")+" "+(x.nom||"")).trim()||"Étudiant",telephone:x.phone||null,adresse:x.address||null,frais_inscription:+x.insFee||0,montant_inscription_paye:+x.paidInsFee||0,montant_formation_paye:+x.paidFee||0,emploi_du_temps:[...(x.scheduleDays||[]),x.scheduleStart,x.scheduleEnd,x.scheduleRoom].filter(Boolean).join(" | ")||null,formateur_id:tid(String(x.formateur||"").trim()),date_inscription:altDate(x.date),actif:altBoolStatus(x.status)})));
+ await altDeleteMissing("etudiant_formations",[]);const joins=[];for(const st of students){for(const n of getStudentFormationNames(st)){const f=forms.find(z=>z.id===n||String(z.name).toLowerCase()===String(n).toLowerCase());if(f)joins.push({id:uuid(),etudiant_id:st.id,formation_id:f.id,prix_convenu:+st.fee||+f.price||0,date_debut:f.start||null,date_fin:f.end||null})}}await altUpsert("etudiant_formations",joins);
+ await altUpsert("devis",quotes.map(x=>({id:x.id,numero:x.ref||null,client_nom:x.client||"Client",client_telephone:x.phone||null,date_devis:altDate(x.date),date_expiration:/^\\d{4}-\\d{2}-\\d{2}$/.test(x.valid||"")?x.valid:null,montant_total:+x.total||0,montant_paye:+x.paid||0,statut:x.status||"Brouillon"})));await altDeleteMissing("devis_lignes",[]);await altUpsert("devis_lignes",quotes.flatMap(q=>(q.lines||[]).map(l=>({id:uuid(),devis_id:q.id,service_id:services.find(s=>s.name===l.serviceName)?.id||null,nom_service:l.serviceName||"Service",quantite:+l.qty||1,prix_unitaire:+l.price||0}))));
+ await altUpsert("factures",invoices.map(x=>({id:x.id,numero:x.ref||null,client_nom:x.client||"Client",client_telephone:x.phone||null,date_facture:altDate(x.date),montant_total:+x.total||0,montant_paye:+x.paid||0,statut:x.status||"Impayée"})));await altDeleteMissing("facture_lignes",[]);await altUpsert("facture_lignes",invoices.flatMap(q=>(q.lines||[]).map(l=>({id:uuid(),facture_id:q.id,service_id:services.find(s=>s.name===l.serviceName)?.id||null,nom_service:l.serviceName||"Service",quantite:+l.qty||1,prix_unitaire:+l.price||0}))));
+ await altUpsert("entrees_fonds",income.map(x=>({id:x.id,reference:x.ref||null,nom_service:x.serviceName||"Entrée",montant:+x.amount||0,date_operation:altDate(x.date)})));await altUpsert("sorties_fonds",expense.map(x=>({id:x.id,reference:x.ref||null,motif:x.reason||x.cat||"Sortie",montant:+x.amount||0,date_operation:altDate(x.date)})));
+ const p=await altSelect("parametres");const ps={id:p?.[0]?.id||uuid(),nom_entreprise:db.settings.name||"ALT-TECH Group",slogan:db.settings.activity||null,adresse:db.settings.address||null,telephone:db.settings.phones||null,email:db.settings.email||null,logo_url:(String(db.settings.logo||"").startsWith("http")?db.settings.logo:null),directeur_general:"M. ABDOULAYE BANGOURA"};await altUpsert("parametres",[ps]);
+ await altDeleteMissing("formations",forms.map(x=>x.id));await altDeleteMissing("services",services.map(x=>x.id));await altDeleteMissing("etudiants",students.map(x=>x.id));await altDeleteMissing("devis",quotes.map(x=>x.id));await altDeleteMissing("factures",invoices.map(x=>x.id));await altDeleteMissing("entrees_fonds",income.map(x=>x.id));await altDeleteMissing("sorties_fonds",expense.map(x=>x.id));
+ showToast("Données synchronisées avec Supabase.");
+ }catch(e){console.error("Supabase sync",e);showToast("Synchronisation Supabase impossible : "+e.message,"danger")}finally{altSyncing=false}}
+const altLocalSave=save;save=function(){altLocalSave();if(altAuth){clearTimeout(altSyncTimer);altSyncTimer=setTimeout(altSyncRemote,700)}};
+login=async function(){const email=(document.getElementById("loginEmail")?.value||"").trim(),password=document.getElementById("loginPass").value,err=document.getElementById("loginError");if(!email||!password){err.textContent="Saisissez votre e-mail et votre mot de passe.";return}err.textContent="Connexion…";try{const r=await fetch(ALT_SUPABASE_URL+"/auth/v1/token?grant_type=password",{method:"POST",headers:{"apikey":ALT_SUPABASE_KEY,"Content-Type":"application/json"},body:JSON.stringify({email,password})});const data=await r.json();if(!r.ok)throw new Error(data.error_description||data.msg||"Connexion refusée");altAuth=data;storageSet(ALT_AUTH_KEY,JSON.stringify(data));const localSnapshot=JSON.parse(JSON.stringify(db));const hasRemote=await altLoadRemote();if(!hasRemote){db=localSnapshot;altRemoteLoaded=true;await altSyncRemote()}err.textContent="";document.getElementById("login").classList.add("hide");document.getElementById("app").classList.remove("hide");setImages();renderAll();showToast("Connexion Supabase réussie.")}catch(e){err.textContent="Connexion impossible : "+e.message}};
+logout=async function(){try{if(altAuth)await fetch(ALT_SUPABASE_URL+"/auth/v1/logout",{method:"POST",headers:altHeaders()})}catch(e){}altAuth=null;storageRemove(ALT_AUTH_KEY);document.getElementById("app").classList.add("hide");document.getElementById("login").classList.remove("hide");document.getElementById("loginPass").value=""};
+changePassword=async function(){let p=document.getElementById("newPass").value;if(p.length<6)return alert("Utilisez au moins 6 caractères.");if(!altAuth)return alert("Reconnectez-vous d'abord.");try{await altFetch("/auth/v1/user",{method:"PUT",body:JSON.stringify({password:p})});document.getElementById("newPass").value="";alert("Mot de passe Supabase modifié.")}catch(e){alert("Modification impossible : "+e.message)}};
+// La restauration reste locale puis est synchronisée via save(). Les données non représentées dans le schéma Supabase restent dans la sauvegarde locale.
+</script>\n</body></html>
